@@ -1,0 +1,291 @@
+// Evony Alliance Dashboard — data model
+// Postgres in every environment (DATABASE_URL). Local dev can point at a
+// throwaway Postgres container just as easily as production does.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  PLAYER
+}
+
+enum Tier {
+  NONE
+  FREE
+  ALLIANCE
+  COMPETITIVE
+}
+
+enum SubscriptionStatus {
+  NONE
+  PENDING
+  ACTIVE
+  CANCELLED
+}
+
+model Server {
+  id        String   @id @default(cuid())
+  number    String   @unique // e.g. "669"
+  createdAt DateTime @default(now())
+
+  alliances Alliance[]
+}
+
+model Alliance {
+  id        String   @id @default(cuid())
+  tag       String // trigram, e.g. "SOG"
+  name      String // e.g. "SpecialOpsGroup"
+  createdAt DateTime @default(now())
+
+  serverId String
+  server   Server @relation(fields: [serverId], references: [id])
+
+  ownerId String
+  owner   User   @relation("AllianceOwner", fields: [ownerId], references: [id])
+
+  // External URL to the alliance's logo image (hosted elsewhere — imgur,
+  // Discord CDN, etc.). Just a link, not stored/served by this app.
+  logoUrl String? @db.Text
+
+  members  User[]    @relation("AllianceMembers")
+  // Users who asked to join by giving this alliance's server number + tag
+  // (at registration, or later from the dashboard) but haven't been
+  // accepted yet — see User.pendingAllianceId. Shown on the Team page's
+  // "Lobby" table, visible only to the alliance's leadership.
+  pendingMembers User[] @relation("AlliancePendingMembers")
+  accounts Account[]
+
+  @@unique([serverId, tag]) // trigram unique per server
+  @@unique([serverId, name]) // name unique per server
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  playerName   String
+  role         Role     @default(PLAYER)
+  createdAt    DateTime @default(now())
+
+  // Admin-granted exemption: when true, this user sees every subscription
+  // tier's features regardless of their own subscription status.
+  freeAccess Boolean @default(false)
+
+  // Preset color key for the generated (initials) avatar shown in the nav
+  // menu — one of the design system's accent colors, not a free color pick.
+  avatarColor String @default("gold")
+
+  allianceId String?
+  alliance   Alliance? @relation("AllianceMembers", fields: [allianceId], references: [id])
+
+  // Set (instead of allianceId) while a join request is awaiting that
+  // alliance's leadership to accept it. accepting the request clears this
+  // and sets allianceId instead — see acceptJoinRequestAction.
+  pendingAllianceId String?
+  pendingAlliance   Alliance? @relation("AlliancePendingMembers", fields: [pendingAllianceId], references: [id])
+
+  // The alliance's creator is its admin by default (see Alliance.ownerId)
+  // and can name at most one other member as leadership at a time — a
+  // member-management right one step below admin: they can see the Lobby
+  // and accept join requests, but can't hand out leadership themselves or
+  // transfer the admin seat.
+  isLeadership Boolean @default(false)
+
+  ownedAlliances Alliance[] @relation("AllianceOwner")
+
+  // The player's own in-game account, linked automatically the moment they
+  // give a GameID while joining a team (registration or the dashboard's
+  // join form) — see requestJoinAlliance. Optional: most Account rows are
+  // never claimed by a platform user (imported historical data, teammates
+  // who never signed up here).
+  account Account? @relation("AccountUser")
+
+  // A subscription belongs to the individual player, not their alliance:
+  // each member of an alliance must have their own active subscription to
+  // see that alliance's data — one member paying doesn't unlock it for the
+  // rest of the alliance.
+  subscription        Subscription?
+  subscriptionHistory  SubscriptionHistory[]
+}
+
+model Subscription {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  tier   Tier               @default(FREE)
+  status SubscriptionStatus @default(ACTIVE)
+
+  paypalRef   String?
+  requestedAt DateTime?
+  activatedAt DateTime?
+  activatedBy String?
+  // Paid tiers are month-to-month; null means "doesn't expire" (the free
+  // tier, or a subscription not yet activated).
+  currentPeriodEnd DateTime?
+  updatedAt        DateTime @updatedAt
+}
+
+// Immutable log of every subscription request/activation, so a player (or
+// an admin) can look back at purchase dates and PayPal references. Written
+// alongside Subscription on every request/activate/cancel — Subscription
+// itself only ever reflects the current state.
+model SubscriptionHistory {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  tier             Tier
+  status           SubscriptionStatus
+  paypalRef        String?
+  requestedAt      DateTime?
+  activatedAt      DateTime?
+  activatedBy      String?
+  currentPeriodEnd DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// A game account, identified by its unique in-game account number (the
+// primary key — not an internally-generated id). An account belongs to
+// exactly one alliance at a time, platform-wide.
+model Account {
+  gameId BigInt @id
+  name   String // in-game display name — can change, not unique
+
+  allianceId String
+  alliance   Alliance @relation(fields: [allianceId], references: [id])
+
+  // The platform user this in-game account belongs to, if any — set when
+  // they give this GameID while joining a team. Most accounts are never
+  // claimed (imported historical data, teammates with no site login).
+  userId String? @unique
+  user   User?   @relation("AccountUser", fields: [userId], references: [id])
+
+  // Defaulted to 0 (rather than required) so joining a team can create a
+  // bare account from just a GameID and name — real stats arrive later via
+  // the Team page's account form or a bulk import.
+  keep  Int   @default(0)
+  power Float @default(0) // stored in "B" units, e.g. 53.2 = 53,200,000 raw power
+  rally Float @default(0)
+  rein  Float @default(0)
+
+  // Attack phase buffs (12): Attack/HP/Defense per troop type.
+  atkGroundAttack Int @default(0)
+  atkGroundHp Int @default(0)
+  atkGroundDefense Int @default(0)
+  atkRangedAttack Int @default(0)
+  atkRangedHp Int @default(0)
+  atkRangedDefense Int @default(0)
+  atkCavalryAttack Int @default(0)
+  atkCavalryHp Int @default(0)
+  atkCavalryDefense Int @default(0)
+  atkSiegeAttack Int @default(0)
+  atkSiegeHp Int @default(0)
+  atkSiegeDefense Int @default(0)
+
+  // Defense phase buffs (12): Attack/HP/Defense per troop type.
+  defGroundAttack Int @default(0)
+  defGroundHp Int @default(0)
+  defGroundDefense Int @default(0)
+  defRangedAttack Int @default(0)
+  defRangedHp Int @default(0)
+  defRangedDefense Int @default(0)
+  defCavalryAttack Int @default(0)
+  defCavalryHp Int @default(0)
+  defCavalryDefense Int @default(0)
+  defSiegeAttack Int @default(0)
+  defSiegeHp Int @default(0)
+  defSiegeDefense Int @default(0)
+
+  // Defense phase debuffs applied to the enemy (12), defense-only.
+  defGroundDebuffAttack Int @default(0)
+  defGroundDebuffHp Int @default(0)
+  defGroundDebuffDefense Int @default(0)
+  defRangedDebuffAttack Int @default(0)
+  defRangedDebuffHp Int @default(0)
+  defRangedDebuffDefense Int @default(0)
+  defCavalryDebuffAttack Int @default(0)
+  defCavalryDebuffHp Int @default(0)
+  defCavalryDebuffDefense Int @default(0)
+  defSiegeDebuffAttack Int @default(0)
+  defSiegeDebuffHp Int @default(0)
+  defSiegeDebuffDefense Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  history AccountHistory[]
+
+  @@index([allianceId])
+}
+
+// Historization of account saves, powering the Alliance evolution charts.
+// Bounded to one row per account per calendar month — saving again within
+// the same month overwrites that month's row instead of adding a new one,
+// to keep volume in check. `periodMonth` is always the 1st of the month in
+// UTC; `capturedAt` is when that row was last written.
+model AccountHistory {
+  id            String  @id @default(cuid())
+  accountGameId BigInt
+  account       Account @relation(fields: [accountGameId], references: [gameId], onDelete: Cascade)
+
+  capturedAt  DateTime @default(now())
+  periodMonth DateTime
+
+  keep  Int
+  power Float
+  rally Float
+  rein  Float
+
+  atkGroundAttack Int @default(0)
+  atkGroundHp Int @default(0)
+  atkGroundDefense Int @default(0)
+  atkRangedAttack Int @default(0)
+  atkRangedHp Int @default(0)
+  atkRangedDefense Int @default(0)
+  atkCavalryAttack Int @default(0)
+  atkCavalryHp Int @default(0)
+  atkCavalryDefense Int @default(0)
+  atkSiegeAttack Int @default(0)
+  atkSiegeHp Int @default(0)
+  atkSiegeDefense Int @default(0)
+
+  defGroundAttack Int @default(0)
+  defGroundHp Int @default(0)
+  defGroundDefense Int @default(0)
+  defRangedAttack Int @default(0)
+  defRangedHp Int @default(0)
+  defRangedDefense Int @default(0)
+  defCavalryAttack Int @default(0)
+  defCavalryHp Int @default(0)
+  defCavalryDefense Int @default(0)
+  defSiegeAttack Int @default(0)
+  defSiegeHp Int @default(0)
+  defSiegeDefense Int @default(0)
+
+  defGroundDebuffAttack Int @default(0)
+  defGroundDebuffHp Int @default(0)
+  defGroundDebuffDefense Int @default(0)
+  defRangedDebuffAttack Int @default(0)
+  defRangedDebuffHp Int @default(0)
+  defRangedDebuffDefense Int @default(0)
+  defCavalryDebuffAttack Int @default(0)
+  defCavalryDebuffHp Int @default(0)
+  defCavalryDebuffDefense Int @default(0)
+  defSiegeDebuffAttack Int @default(0)
+  defSiegeDebuffHp Int @default(0)
+  defSiegeDebuffDefense Int @default(0)
+
+  @@unique([accountGameId, periodMonth])
+  @@index([accountGameId, capturedAt])
+}

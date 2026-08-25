@@ -1,0 +1,31 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/app/globals.css"
+        ],
+        "createdAt": "2026-08-22T19:58:45.489Z",
+        "reason": "SOG#669 spec pins '2px gold-dim left edge bar' on KPI cards as established brand identity"
+      },
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "src/app/globals.css"
+        ],
+        "createdAt": "2026-08-22T19:58:45.566Z",
+        "reason": "SOG#669 spec pins a 'subtle gold dot-grid' war-room background as established brand identity"
+      },
+      {
+        "rule": "design-system-color",
+        "value": "rgba(0,0,0,0.5)",
+        "createdAt": "2026-08-23T18:46:14.550Z"
+      }
+    ]
+  }
+}
